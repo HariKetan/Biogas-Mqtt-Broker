@@ -50,6 +50,24 @@ function applySensorTransformations(sensorId, regAdd, value, sensorName) {
 		// New moisture and humidity sensors
 		"8_0": (val) => val / 10, // Moisture sensor with scaling
 		"8_1": (val) => val / 10, // Humidity sensor with scaling
+
+		// New sensors for device 1368
+		"1_0": (val) => val, // Sensor1 from device 1368
+		"2_0": (val) => val, // Sensor2 from device 1368
+
+		// Multiple methane sensors for device 1368
+		"1_0_1": (val) => val, // Methane1
+		"1_0_2": (val) => val, // Methane2
+		"1_0_3": (val) => val, // Methane3
+		"1_0_4": (val) => val, // Methane4
+		"1_0_5": (val) => val, // Methane5
+		"1_0_6": (val) => val, // Methane6
+
+		// Multiple pH sensors for device 1368
+		"2_0_1": (val) => val, // pH1
+		"2_0_2": (val) => val, // pH2
+		"2_0_3": (val) => val, // pH3
+		"2_0_4": (val) => val, // pH4
 	};
 
 	const transformationKey = `${sensorId}_${regAdd}`;
@@ -206,7 +224,6 @@ mqttClient.on("message", async (receivedTopic, message) => {
 
 			const slaveId = messageObj.SL_ID;
 			const regAdd = messageObj.RegAd;
-			let insertValue = messageObj.D1;
 			const device_id = messageObj.ID;
 			const d_time = messageObj.DATE + " " + messageObj.TIME;
 
@@ -228,29 +245,78 @@ mqttClient.on("message", async (receivedTopic, message) => {
 			const sensorKey = sensorParameters.keys;
 			const sensorUnit = sensorParameters.siunit;
 
-			console.log(
-				`Processing sensor: ${sensorKey} (${sensorUnit}) - Raw Value: ${insertValue}`
-			);
+			// Handle multiple sensor values for device 1368
+			if (device_id === '1368') {
+				const sensorValues = [];
+				
+				// Collect all available D values
+				for (let i = 1; i <= 6; i++) {
+					const dValue = messageObj[`D${i}`];
+					if (dValue !== undefined && dValue !== null) {
+						sensorValues.push({
+							value: dValue,
+							index: i
+						});
+					}
+				}
 
-			// Apply sensor transformations using the enhanced function
-			insertValue = applySensorTransformations(
-				sensorId,
-				regAdd,
-				insertValue,
-				sensorKey
-			);
+				console.log(`Processing ${sensorValues.length} values for ${sensorKey} (${sensorUnit})`);
 
-			const insertQuery = `
-				INSERT INTO SENSOR_VALUE (DEVICE_ID, SLAVE_ID, REG_ADD, VALUE, U_TIME, D_TTIME)
-				VALUES ($1, $2, $3, $4, NOW(), $5)
-			`;
+				// Insert each sensor value with a unique identifier
+				for (const sensorData of sensorValues) {
+					let insertValue = sensorData.value;
+					
+					// Apply sensor transformations using the enhanced function
+					insertValue = applySensorTransformations(
+						sensorId,
+						regAdd,
+						insertValue,
+						sensorKey
+					);
 
-			const insertValues = [device_id, sensorId, regAdd, insertValue, d_time];
-			const result = await pool.query(insertQuery, insertValues);
+					// Create a unique register address for each sensor value
+					const uniqueRegAdd = `${regAdd}_${sensorData.index}`;
 
-			console.log(
-				`Successfully inserted ${sensorKey} value: ${insertValue} ${sensorUnit}`
-			);
+					const insertQuery = `
+						INSERT INTO SENSOR_VALUE (DEVICE_ID, SLAVE_ID, REG_ADD, VALUE, U_TIME, D_TTIME)
+						VALUES ($1, $2, $3, $4, NOW(), $5)
+					`;
+
+					const insertValues = [device_id, sensorId, uniqueRegAdd, insertValue, d_time];
+					const result = await pool.query(insertQuery, insertValues);
+
+					console.log(
+						`Successfully inserted ${sensorKey} value ${sensorData.index}: ${insertValue} ${sensorUnit}`
+					);
+				}
+			} else {
+				// Original single value processing for other devices
+				let insertValue = messageObj.D1;
+
+				console.log(
+					`Processing sensor: ${sensorKey} (${sensorUnit}) - Raw Value: ${insertValue}`
+				);
+
+				// Apply sensor transformations using the enhanced function
+				insertValue = applySensorTransformations(
+					sensorId,
+					regAdd,
+					insertValue,
+					sensorKey
+				);
+
+				const insertQuery = `
+					INSERT INTO SENSOR_VALUE (DEVICE_ID, SLAVE_ID, REG_ADD, VALUE, U_TIME, D_TTIME)
+					VALUES ($1, $2, $3, $4, NOW(), $5)
+				`;
+
+				const insertValues = [device_id, sensorId, regAdd, insertValue, d_time];
+				const result = await pool.query(insertQuery, insertValues);
+
+				console.log(
+					`Successfully inserted ${sensorKey} value: ${insertValue} ${sensorUnit}`
+				);
+			}
 		} else {
 			console.error("Invalid message format:", messageObj);
 		}
