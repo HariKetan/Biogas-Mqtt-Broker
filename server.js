@@ -68,6 +68,9 @@ function applySensorTransformations(sensorId, regAdd, value, sensorName) {
 		"2_0_2": (val) => val, // pH2
 		"2_0_3": (val) => val, // pH3
 		"2_0_4": (val) => val, // pH4
+
+		// Weight sensor for device 1368
+		"7_0": (val) => val, // Weight
 	};
 
 	const transformationKey = `${sensorId}_${regAdd}`;
@@ -247,46 +250,81 @@ mqttClient.on("message", async (receivedTopic, message) => {
 
 			// Handle multiple sensor values for device 1368
 			if (device_id === '1368') {
-				const sensorValues = [];
-				
-				// Collect all available D values
-				for (let i = 1; i <= 6; i++) {
-					const dValue = messageObj[`D${i}`];
+				// Special handling for weight sensor (SL_ID 7) - single value
+				if (slaveId === '7') {
+					const dValue = messageObj.D1;
 					if (dValue !== undefined && dValue !== null) {
-						sensorValues.push({
-							value: dValue,
-							index: i
-						});
+						let insertValue = dValue;
+						
+						// Apply sensor transformations
+						insertValue = applySensorTransformations(
+							sensorId,
+							regAdd,
+							insertValue,
+							sensorKey
+						);
+
+						const insertQuery = `
+							INSERT INTO SENSOR_VALUE (DEVICE_ID, SLAVE_ID, REG_ADD, VALUE, U_TIME, D_TTIME)
+							VALUES ($1, $2, $3, $4, NOW(), $5)
+						`;
+
+						const insertValues = [device_id, sensorId, regAdd, insertValue, d_time];
+						const result = await pool.query(insertQuery, insertValues);
+
+						console.log(
+							`Successfully inserted ${sensorKey} value: ${insertValue} ${sensorUnit}`
+						);
 					}
+					return;
 				}
 
-				console.log(`Processing ${sensorValues.length} values for ${sensorKey} (${sensorUnit})`);
+				// For other sensors (methane, pH), find all sensor parameters that start with the base reg_add
+				const matchingSensors = result2.filter(
+					(param) => param.slave_id === slaveId && param.reg_add.startsWith(regAdd + '_')
+				);
 
-				// Insert each sensor value with a unique identifier
-				for (const sensorData of sensorValues) {
-					let insertValue = sensorData.value;
+				if (matchingSensors.length === 0) {
+					console.log(`No matching sensors found for device 1368, SL_ID ${slaveId}, base RegAd ${regAdd}`);
+					return;
+				}
+
+				console.log(`Found ${matchingSensors.length} matching sensors for ${sensorKey} (${sensorUnit})`);
+
+				// Process each matching sensor
+				for (const matchingSensor of matchingSensors) {
+					// Extract the index from the reg_add (e.g., "0_1" -> index 1)
+					const indexMatch = matchingSensor.reg_add.match(/_(\d+)$/);
+					if (!indexMatch) continue;
+					
+					const index = parseInt(indexMatch[1]);
+					const dValue = messageObj[`D${index}`];
+					
+					if (dValue === undefined || dValue === null) {
+						console.log(`No D${index} value found for sensor ${matchingSensor.keys}`);
+						continue;
+					}
+
+					let insertValue = dValue;
 					
 					// Apply sensor transformations using the enhanced function
 					insertValue = applySensorTransformations(
-						sensorId,
-						regAdd,
+						matchingSensor.slave_id,
+						matchingSensor.reg_add,
 						insertValue,
-						sensorKey
+						matchingSensor.keys
 					);
-
-					// Create a unique register address for each sensor value
-					const uniqueRegAdd = `${regAdd}_${sensorData.index}`;
 
 					const insertQuery = `
 						INSERT INTO SENSOR_VALUE (DEVICE_ID, SLAVE_ID, REG_ADD, VALUE, U_TIME, D_TTIME)
 						VALUES ($1, $2, $3, $4, NOW(), $5)
 					`;
 
-					const insertValues = [device_id, sensorId, uniqueRegAdd, insertValue, d_time];
+					const insertValues = [device_id, matchingSensor.slave_id, matchingSensor.reg_add, insertValue, d_time];
 					const result = await pool.query(insertQuery, insertValues);
 
 					console.log(
-						`Successfully inserted ${sensorKey} value ${sensorData.index}: ${insertValue} ${sensorUnit}`
+						`Successfully inserted ${matchingSensor.keys} value: ${insertValue} ${matchingSensor.siunit}`
 					);
 				}
 			} else {
